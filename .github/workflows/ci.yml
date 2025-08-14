@@ -1,0 +1,169 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        build_type: [Debug, Release]
+        compiler:
+          - { cc: gcc, cxx: g++ }
+          - { cc: clang, cxx: clang++ }
+        exclude:
+          # Exclude clang on Windows (use MSVC instead)
+          - os: windows-latest
+            compiler: { cc: clang, cxx: clang++ }
+        include:
+          # Add MSVC for Windows
+          - os: windows-latest
+            compiler: { cc: cl, cxx: cl }
+            build_type: Debug
+          - os: windows-latest
+            compiler: { cc: cl, cxx: cl }
+            build_type: Release
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - uses: actions/checkout@v3
+      with:
+        submodules: recursive
+
+    - name: Set up build environment (Ubuntu)
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake valgrind cppcheck clang-tidy
+
+    - name: Set up build environment (macOS)
+      if: matrix.os == 'macos-latest'
+      run: |
+        brew install cmake cppcheck
+
+    - name: Configure CMake
+      env:
+        CC: ${{ matrix.compiler.cc }}
+        CXX: ${{ matrix.compiler.cxx }}
+      run: |
+        cmake -B build -S reference/sylves-c \
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+          -DBUILD_TESTS=ON \
+          -DBUILD_EXAMPLES=ON
+
+    - name: Build
+      run: cmake --build build --config ${{ matrix.build_type }}
+
+    - name: Run tests
+      working-directory: build
+      run: ctest --output-on-failure -C ${{ matrix.build_type }}
+
+    - name: Run Valgrind memory checks (Linux Debug)
+      if: matrix.os == 'ubuntu-latest' && matrix.build_type == 'Debug' && matrix.compiler.cc == 'gcc'
+      working-directory: build
+      run: |
+        ctest -T memcheck --output-on-failure
+        if [ -f Testing/Temporary/MemoryChecker.*.log ]; then
+          cat Testing/Temporary/MemoryChecker.*.log
+        fi
+
+  static-analysis:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Install analysis tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cppcheck clang-tidy clang-format
+
+    - name: Run cppcheck
+      run: |
+        cppcheck --enable=all --error-exitcode=1 --suppress=missingIncludeSystem \
+          --inline-suppr --quiet \
+          -I reference/sylves-c/src/include \
+          reference/sylves-c/src/
+
+    - name: Check code formatting
+      run: |
+        find reference/sylves-c -name "*.c" -o -name "*.h" | xargs clang-format --dry-run --Werror
+
+  code-coverage:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake gcovr
+
+    - name: Configure with coverage
+      run: |
+        cmake -B build -S reference/sylves-c \
+          -DCMAKE_BUILD_TYPE=Debug \
+          -DCMAKE_C_FLAGS="--coverage -fprofile-arcs -ftest-coverage" \
+          -DBUILD_TESTS=ON
+
+    - name: Build
+      run: cmake --build build
+
+    - name: Run tests
+      working-directory: build
+      run: ctest --output-on-failure
+
+    - name: Generate coverage report
+      run: |
+        gcovr --root reference/sylves-c/src \
+          --exclude ".*test.*" \
+          --exclude ".*example.*" \
+          --print-summary \
+          --xml coverage.xml \
+          --html-details coverage.html
+
+    - name: Upload coverage reports
+      uses: actions/upload-artifact@v3
+      with:
+        name: coverage-report
+        path: |
+          coverage.xml
+          coverage.html
+
+    - name: Check coverage threshold
+      run: |
+        # Extract coverage percentage and check if it meets minimum threshold
+        COVERAGE=$(gcovr --root reference/sylves-c/src --print-summary | grep "TOTAL" | awk '{print $4}' | sed 's/%//')
+        echo "Code coverage: ${COVERAGE}%"
+        if (( $(echo "$COVERAGE < 80" | bc -l) )); then
+          echo "Coverage ${COVERAGE}% is below threshold of 80%"
+          exit 1
+        fi
+
+  documentation:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Install Doxygen
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y doxygen graphviz
+
+    - name: Generate documentation
+      run: |
+        cd reference/sylves-c
+        doxygen Doxyfile
+
+    - name: Upload documentation
+      uses: actions/upload-artifact@v3
+      with:
+        name: documentation
+        path: reference/sylves-c/docs/html/

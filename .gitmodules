@@ -1,0 +1,3 @@
+[submodule "submodules/sylves"]
+	path = submodules/sylves
+	url = git@github.com:BorisTheBrave/sylves.git

@@ -1,0 +1,970 @@
+/**
+ * @file quad_interpolation.c
+ * @brief Quad interpolation over SylvesMeshDataEx faces (quads only)
+ */
+
+#include "sylves/quad_interpolation.h"
+#include "sylves/types.h"
+#include "sylves/mesh_data.h"
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+
+/* Simple lerp for vectors */
+static SylvesVector3 lerp3(SylvesVector3 a, SylvesVector3 b, float t) {
+    SylvesVector3 r = { 
+        a.x + (b.x - a.x) * t, 
+        a.y + (b.y - a.y) * t, 
+        a.z + (b.z - a.z) * t 
+    }; 
+    return r;
+}
+
+SylvesQuadInterpolation* sylves_quad_interpolation_create_from_mesh(
+    const SylvesMeshData* mesh, int submesh, int face, bool invert_winding, SylvesError* error_out)
+{
+    (void)mesh; (void)submesh; (void)face; (void)invert_winding;
+    if (error_out) *error_out = SYLVES_ERROR_NOT_SUPPORTED;
+    return NULL;
+}
+
+SylvesQuadInterpolation* sylves_quad_interpolation_create_prism_from_mesh(
+    const SylvesMeshData* mesh, int submesh, int face, bool invert_winding,
+    float mesh_offset1, float mesh_offset2, SylvesError* error_out)
+{
+    (void)mesh; (void)submesh; (void)face; (void)invert_winding; (void)mesh_offset1; (void)mesh_offset2;
+    if (error_out) *error_out = SYLVES_ERROR_NOT_SUPPORTED;
+    return NULL;
+}
+
+SylvesQuadInterpolation* sylves_quad_interpolation_create_2d(
+    const SylvesVector3* v1, const SylvesVector3* v2,
+    const SylvesVector3* v3, const SylvesVector3* v4, SylvesError* error_out)
+{
+    if (!v1 || !v2 || !v3 || !v4) { if (error_out) *error_out = SYLVES_ERROR_INVALID_ARGUMENT; return NULL; }
+    SylvesQuadInterpolation* qi = (SylvesQuadInterpolation*)calloc(1, sizeof(SylvesQuadInterpolation));
+    if (!qi) { if (error_out) *error_out = SYLVES_ERROR_OUT_OF_MEMORY; return NULL; }
+    qi->v1 = *v1; qi->v2 = *v2; qi->v3 = *v3; qi->v4 = *v4; qi->is_3d = false;
+    if (error_out) *error_out = SYLVES_SUCCESS;
+    return qi;
+}
+
+SylvesQuadInterpolation* sylves_quad_interpolation_create_3d(
+    const SylvesVector3* v1, const SylvesVector3* v2, const SylvesVector3* v3, const SylvesVector3* v4,
+    const SylvesVector3* v5, const SylvesVector3* v6, const SylvesVector3* v7, const SylvesVector3* v8,
+    SylvesError* error_out)
+{
+    if (!v1||!v2||!v3||!v4||!v5||!v6||!v7||!v8) { if (error_out) *error_out = SYLVES_ERROR_INVALID_ARGUMENT; return NULL; }
+    SylvesQuadInterpolation* qi = (SylvesQuadInterpolation*)calloc(1, sizeof(SylvesQuadInterpolation));
+    if (!qi) { if (error_out) *error_out = SYLVES_ERROR_OUT_OF_MEMORY; return NULL; }
+    qi->v1=*v1;qi->v2=*v2;qi->v3=*v3;qi->v4=*v4;qi->v5=*v5;qi->v6=*v6;qi->v7=*v7;qi->v8=*v8; qi->is_3d = true;
+    if (error_out) *error_out = SYLVES_SUCCESS;
+    return qi;
+}
+
+void sylves_quad_interpolation_destroy(SylvesQuadInterpolation* interp) { free(interp); }
+
+SylvesVector3 sylves_quad_interpolation_position(const SylvesQuadInterpolation* interp, SylvesVector3 p)
+{
+    if (!interp) { SylvesVector3 z={0,0,0}; return z; }
+    if (interp->is_3d) {
+        /* Simple trilinear-like between v1..v8 with p in [-0.5,0.5]^3 */
+        float x = p.x + 0.5f, y = p.y + 0.5f, z = p.z + 0.5f;
+        SylvesVector3 a = lerp3(interp->v1, interp->v2, y);
+        SylvesVector3 b = lerp3(interp->v4, interp->v3, y);
+        SylvesVector3 c = lerp3(interp->v5, interp->v6, y);
+        SylvesVector3 d = lerp3(interp->v8, interp->v7, y);
+        SylvesVector3 e = lerp3(a, b, x);
+        SylvesVector3 f = lerp3(c, d, x);
+        return lerp3(e, f, z);
+    } else {
+        float x = p.x + 0.5f, y = p.y + 0.5f;
+        SylvesVector3 a = lerp3(interp->v1, interp->v2, y);
+        SylvesVector3 b = lerp3(interp->v4, interp->v3, y);
+        return lerp3(a, b, x);
+    }
+}
+
+void sylves_quad_interpolation_jacobi(const SylvesQuadInterpolation* interp, SylvesVector3 p, SylvesMatrix4x4* jacobi)
+{
+    (void)interp; (void)p;
+    if (!jacobi) return;
+    memset(jacobi, 0, sizeof(SylvesMatrix4x4));
+    jacobi->m[15] = 1.0f;
+}
+
+/**
+ * @brief Get corners for 3D quad prism from mesh face with offsets
+ */
+static bool get_corners_3d(
+    const SylvesMeshData* mesh,
+    int submesh,
+    int face,
+    bool invert_winding,
+    float mesh_offset1,
+    float mesh_offset2,
+    SylvesVector3* v1,
+    SylvesVector3* v2,
+    SylvesVector3* v3,
+    SylvesVector3* v4,
+    SylvesVector3* v5,
+    SylvesVector3* v6,
+    SylvesVector3* v7,
+    SylvesVector3* v8,
+    SylvesError* error_out)
+{
+    /* First get base corners */
+    SylvesVector3 base_v1, base_v2, base_v3, base_v4;
+    if (!get_corners_2d(mesh, submesh, face, invert_winding,
+                       &base_v1, &base_v2, &base_v3, &base_v4, error_out)) {
+        return false;
+    }
+    
+    /* Check for normals */
+    if (!mesh->normals || mesh->normal_count == 0) {
+        sylves_error_set(error_out, SYLVES_ERROR_INVALID_OPERATION,
+                        "Mesh needs normals for prism interpolation");
+        return false;
+    }
+    
+    /* Get vertex indices again for normals */
+    const int* indices = mesh->submesh_indices[submesh];
+    const SylvesVector3* normals = mesh->normals;
+    
+    int i1, i2, i3, i4;
+    if (invert_winding) {
+        i1 = indices[face * 4 + 3];
+        i2 = indices[face * 4 + 2];
+        i3 = indices[face * 4 + 1];
+        i4 = indices[face * 4 + 0];
+    } else {
+        i1 = indices[face * 4 + 0];
+        i2 = indices[face * 4 + 1];
+        i3 = indices[face * 4 + 2];
+        i4 = indices[face * 4 + 3];
+    }
+    
+    /* Calculate offset vertices */
+    /* Lower layer (offset1) */
+    *v1 = sylves_vector3_add(base_v1, sylves_vector3_scale(normals[i1], mesh_offset1));
+    *v2 = sylves_vector3_add(base_v2, sylves_vector3_scale(normals[i2], mesh_offset1));
+    *v3 = sylves_vector3_add(base_v3, sylves_vector3_scale(normals[i3], mesh_offset1));
+    *v4 = sylves_vector3_add(base_v4, sylves_vector3_scale(normals[i4], mesh_offset1));
+    
+    /* Upper layer (offset2) */
+    *v5 = sylves_vector3_add(base_v1, sylves_vector3_scale(normals[i1], mesh_offset2));
+    *v6 = sylves_vector3_add(base_v2, sylves_vector3_scale(normals[i2], mesh_offset2));
+    *v7 = sylves_vector3_add(base_v3, sylves_vector3_scale(normals[i3], mesh_offset2));
+    *v8 = sylves_vector3_add(base_v4, sylves_vector3_scale(normals[i4], mesh_offset2));
+    
+    return true;
+}
+
+/**
+ * @brief Create quad interpolation from mesh face
+ */
+SylvesQuadInterpolation* sylves_quad_interpolation_create_from_mesh(
+    const SylvesMeshData* mesh,
+    int submesh,
+    int face,
+    bool invert_winding,
+    SylvesError* error_out)
+{
+    SylvesQuadInterpolation* interp = calloc(1, sizeof(SylvesQuadInterpolation));
+    if (!interp) {
+        sylves_error_set(error_out, SYLVES_ERROR_OUT_OF_MEMORY,
+                        "Failed to allocate quad interpolation");
+        return NULL;
+    }
+    
+    if (!get_corners_2d(mesh, submesh, face, invert_winding,
+                       &interp->v1, &interp->v2, &interp->v3, &interp->v4,
+                       error_out)) {
+        free(interp);
+        return NULL;
+    }
+    
+    interp->is_3d = false;
+    return interp;
+}
+
+/**
+ * @brief Create quad prism interpolation from mesh face with offsets
+ */
+SylvesQuadInterpolation* sylves_quad_interpolation_create_prism_from_mesh(
+    const SylvesMeshData* mesh,
+    int submesh,
+    int face,
+    bool invert_winding,
+    float mesh_offset1,
+    float mesh_offset2,
+    SylvesError* error_out)
+{
+    SylvesQuadInterpolation* interp = calloc(1, sizeof(SylvesQuadInterpolation));
+    if (!interp) {
+        sylves_error_set(error_out, SYLVES_ERROR_OUT_OF_MEMORY,
+                        "Failed to allocate quad interpolation");
+        return NULL;
+    }
+    
+    if (!get_corners_3d(mesh, submesh, face, invert_winding,
+                       mesh_offset1, mesh_offset2,
+                       &interp->v1, &interp->v2, &interp->v3, &interp->v4,
+                       &interp->v5, &interp->v6, &interp->v7, &interp->v8,
+                       error_out)) {
+        free(interp);
+        return NULL;
+    }
+    
+    interp->is_3d = true;
+    return interp;
+}
+
+/**
+ * @brief Create quad interpolation from 4 vertices
+ */
+SylvesQuadInterpolation* sylves_quad_interpolation_create_2d(
+    const SylvesVector3* v1,
+    const SylvesVector3* v2,
+    const SylvesVector3* v3,
+    const SylvesVector3* v4,
+    SylvesError* error_out)
+{
+    if (!v1 || !v2 || !v3 || !v4) {
+        sylves_error_set(error_out, SYLVES_ERROR_INVALID_ARGUMENT,
+                        "Null vertex pointer");
+        return NULL;
+    }
+    
+    SylvesQuadInterpolation* interp = calloc(1, sizeof(SylvesQuadInterpolation));
+    if (!interp) {
+        sylves_error_set(error_out, SYLVES_ERROR_OUT_OF_MEMORY,
+                        "Failed to allocate quad interpolation");
+        return NULL;
+    }
+    
+    interp->v1 = *v1;
+    interp->v2 = *v2;
+    interp->v3 = *v3;
+    interp->v4 = *v4;
+    interp->is_3d = false;
+    
+    return interp;
+}
+
+/**
+ * @brief Create quad prism interpolation from 8 vertices
+ */
+SylvesQuadInterpolation* sylves_quad_interpolation_create_3d(
+    const SylvesVector3* v1,
+    const SylvesVector3* v2,
+    const SylvesVector3* v3,
+    const SylvesVector3* v4,
+    const SylvesVector3* v5,
+    const SylvesVector3* v6,
+    const SylvesVector3* v7,
+    const SylvesVector3* v8,
+    SylvesError* error_out)
+{
+    if (!v1 || !v2 || !v3 || !v4 || !v5 || !v6 || !v7 || !v8) {
+        sylves_error_set(error_out, SYLVES_ERROR_INVALID_ARGUMENT,
+                        "Null vertex pointer");
+        return NULL;
+    }
+    
+    SylvesQuadInterpolation* interp = calloc(1, sizeof(SylvesQuadInterpolation));
+    if (!interp) {
+        sylves_error_set(error_out, SYLVES_ERROR_OUT_OF_MEMORY,
+                        "Failed to allocate quad interpolation");
+        return NULL;
+    }
+    
+    interp->v1 = *v1;
+    interp->v2 = *v2;
+    interp->v3 = *v3;
+    interp->v4 = *v4;
+    interp->v5 = *v5;
+    interp->v6 = *v6;
+    interp->v7 = *v7;
+    interp->v8 = *v8;
+    interp->is_3d = true;
+    
+    return interp;
+}
+
+/**
+ * @brief Destroy quad interpolation
+ */
+void sylves_quad_interpolation_destroy(SylvesQuadInterpolation* interp)
+{
+    free(interp);
+}
+
+/**
+ * @brief Interpolate position using bilinear or trilinear interpolation
+ * 
+ * For 2D: Bilinear interpolation on quad, z value of p is unused
+ * For 3D: Trilinear interpolation on prism
+ * 
+ * Following Sylves conventions:
+ * - 2D: v1=(-0.5,0,-0.5), v2=(-0.5,0,0.5), v3=(0.5,0,0.5), v4=(0.5,0,-0.5)
+ * - 3D: v1-v4 at y=-0.5, v5-v8 at y=0.5
+ */
+SylvesVector3 sylves_quad_interpolation_position(
+    const SylvesQuadInterpolation* interp,
+    SylvesVector3 p)
+{
+    if (!interp) {
+        return sylves_vector3_zero();
+    }
+    
+    if (interp->is_3d) {
+        /* Trilinear interpolation */
+        float x1 = 0.5f - p.x;
+        float x2 = 0.5f + p.x;
+        float y1 = 0.5f - p.y;
+        float y2 = 0.5f + p.y;
+        float z1 = 0.5f - p.z;
+        float z2 = 0.5f + p.z;
+        
+        /* Interpolate along y for each corner */
+        SylvesVector3 u1 = sylves_vector3_add(
+            sylves_vector3_scale(interp->v4, y1),
+            sylves_vector3_scale(interp->v3, y2)
+        );
+        SylvesVector3 u2 = sylves_vector3_add(
+            sylves_vector3_scale(interp->v1, y1),
+            sylves_vector3_scale(interp->v2, y2)
+        );
+        SylvesVector3 u3 = sylves_vector3_add(
+            sylves_vector3_scale(interp->v8, y1),
+            sylves_vector3_scale(interp->v7, y2)
+        );
+        SylvesVector3 u4 = sylves_vector3_add(
+            sylves_vector3_scale(interp->v5, y1),
+            sylves_vector3_scale(interp->v6, y2)
+        );
+        
+        /* Interpolate along x */
+        SylvesVector3 w1 = sylves_vector3_add(
+            sylves_vector3_scale(u1, x1),
+            sylves_vector3_scale(u2, x2)
+        );
+        SylvesVector3 w2 = sylves_vector3_add(
+            sylves_vector3_scale(u3, x1),
+            sylves_vector3_scale(u4, x2)
+        );
+        
+        /* Interpolate along z */
+        return sylves_vector3_add(
+            sylves_vector3_scale(w1, z1),
+            sylves_vector3_scale(w2, z2)
+        );
+    } else {
+        /* Bilinear interpolation */
+        float x1 = 0.5f - p.x;
+        float x2 = 0.5f + p.x;
+        float y1 = 0.5f - p.y;
+        float y2 = 0.5f + p.y;
+        
+        /* Interpolate along y for each x */
+        SylvesVector3 u1 = sylves_vector3_add(
+            sylves_vector3_scale(interp->v4, y1),
+            sylves_vector3_scale(interp->v3, y2)
+        );
+        SylvesVector3 u2 = sylves_vector3_add(
+            sylves_vector3_scale(interp->v1, y1),
+            sylves_vector3_scale(interp->v2, y2)
+        );
+        
+        /* Interpolate along x */
+        return sylves_vector3_add(
+            sylves_vector3_scale(u1, x1),
+            sylves_vector3_scale(u2, x2)
+        );
+    }
+}
+
+/**
+ * @brief Get Jacobian matrix for position interpolation
+ * 
+ * Returns the derivative of the interpolation function
+ */
+void sylves_quad_interpolation_jacobi(
+    const SylvesQuadInterpolation* interp,
+    SylvesVector3 p,
+    SylvesMatrix4x4* jacobi)
+{
+    if (!interp || !jacobi) {
+        return;
+    }
+    
+    if (interp->is_3d) {
+        /* Trilinear interpolation Jacobian */
+        float x1 = 0.5f - p.x;
+        float x2 = 0.5f + p.x;
+        float y1 = 0.5f - p.y;
+        float y2 = 0.5f + p.y;
+        float z1 = 0.5f - p.z;
+        float z2 = 0.5f + p.z;
+        
+        /* Interpolate along y */
+        SylvesVector3 u1 = sylves_vector3_add(
+            sylves_vector3_scale(interp->v4, y1),
+            sylves_vector3_scale(interp->v3, y2)
+        );
+        SylvesVector3 u2 = sylves_vector3_add(
+            sylves_vector3_scale(interp->v1, y1),
+            sylves_vector3_scale(interp->v2, y2)
+        );
+        SylvesVector3 u3 = sylves_vector3_add(
+            sylves_vector3_scale(interp->v8, y1),
+            sylves_vector3_scale(interp->v7, y2)
+        );
+        SylvesVector3 u4 = sylves_vector3_add(
+            sylves_vector3_scale(interp->v5, y1),
+            sylves_vector3_scale(interp->v6, y2)
+        );
+        
+        /* Derivatives with respect to y */
+        SylvesVector3 du1dy = sylves_vector3_sub(interp->v3, interp->v4);
+        SylvesVector3 du2dy = sylves_vector3_sub(interp->v2, interp->v1);
+        SylvesVector3 du3dy = sylves_vector3_sub(interp->v7, interp->v8);
+        SylvesVector3 du4dy = sylves_vector3_sub(interp->v6, interp->v5);
+        
+        /* Interpolate along x */
+        SylvesVector3 w1 = sylves_vector3_add(
+            sylves_vector3_scale(u1, x1),
+            sylves_vector3_scale(u2, x2)
+        );
+        SylvesVector3 w2 = sylves_vector3_add(
+            sylves_vector3_scale(u3, x1),
+            sylves_vector3_scale(u4, x2)
+        );
+        
+        /* Derivatives with respect to y, interpolated along x */
+        SylvesVector3 dw1dy = sylves_vector3_add(
+            sylves_vector3_scale(du1dy, x1),
+            sylves_vector3_scale(du2dy, x2)
+        );
+        SylvesVector3 dw2dy = sylves_vector3_add(
+            sylves_vector3_scale(du3dy, x1),
+            sylves_vector3_scale(du4dy, x2)
+        );
+        
+        /* Derivatives with respect to x */
+        SylvesVector3 dw1dx = sylves_vector3_sub(u2, u1);
+        SylvesVector3 dw2dx = sylves_vector3_sub(u4, u3);
+        
+        /* Final position */
+        SylvesVector3 z = sylves_vector3_add(
+            sylves_vector3_scale(w1, z1),
+            sylves_vector3_scale(w2, z2)
+        );
+        
+        /* Final derivatives */
+        SylvesVector3 dzdy = sylves_vector3_add(
+            sylves_vector3_scale(dw1dy, z1),
+            sylves_vector3_scale(dw2dy, z2)
+        );
+        SylvesVector3 dzdx = sylves_vector3_add(
+            sylves_vector3_scale(dw1dx, z1),
+            sylves_vector3_scale(dw2dx, z2)
+        );
+        SylvesVector3 dzdz = sylves_vector3_sub(w2, w1);
+        
+        /* Build Jacobian matrix */
+        sylves_matrix4x4_set_column(jacobi, 0, dzdx);
+        sylves_matrix4x4_set_column(jacobi, 1, dzdy);
+        sylves_matrix4x4_set_column(jacobi, 2, dzdz);
+        sylves_matrix4x4_set_column(jacobi, 3, z);
+        jacobi->m[3][3] = 1.0f;
+        
+    } else {
+        /* Bilinear interpolation Jacobian */
+        float x1 = 0.5f - p.x;
+        float x2 = 0.5f + p.x;
+        float y1 = 0.5f - p.y;
+        float y2 = 0.5f + p.y;
+        
+        /* Interpolate along y */
+        SylvesVector3 u1 = sylves_vector3_add(
+            sylves_vector3_scale(interp->v4, y1),
+            sylves_vector3_scale(interp->v3, y2)
+        );
+        SylvesVector3 u2 = sylves_vector3_add(
+            sylves_vector3_scale(interp->v1, y1),
+            sylves_vector3_scale(interp->v2, y2)
+        );
+        
+        /* Derivatives with respect to y */
+        SylvesVector3 du1dy = sylves_vector3_sub(interp->v3, interp->v4);
+        SylvesVector3 du2dy = sylves_vector3_sub(interp->v2, interp->v1);
+        
+        /* Final position */
+        SylvesVector3 o = sylves_vector3_add(
+            sylves_vector3_scale(u1, x1),
+            sylves_vector3_scale(u2, x2)
+        );
+        
+        /* Final derivatives */
+        SylvesVector3 dodx = sylves_vector3_sub(u2, u1);
+        SylvesVector3 dody = sylves_vector3_add(
+            sylves_vector3_scale(du1dy, x1),
+            sylves_vector3_scale(du2dy, x2)
+        );
+        
+        /* Build Jacobian matrix */
+        sylves_matrix4x4_set_column(jacobi, 0, dodx);
+        sylves_matrix4x4_set_column(jacobi, 1, dody);
+        sylves_matrix4x4_set_column(jacobi, 2, sylves_vector3_zero());
+        sylves_matrix4x4_set_column(jacobi, 3, o);
+        jacobi->m[3][3] = 1.0f;
+    }
+}
+
+/**
+ * @brief Create attribute interpolation for normals
+ */
+SylvesQuadAttributeInterp* sylves_quad_interp_normals_create(
+    const SylvesMeshData* mesh,
+    int submesh,
+    int face,
+    bool invert_winding,
+    SylvesError* error_out)
+{
+    /* Validate mesh has normals */
+    if (!mesh || !mesh->normals || mesh->normal_count == 0) {
+        sylves_error_set(error_out, SYLVES_ERROR_INVALID_OPERATION,
+                        "Mesh needs normals for normal interpolation");
+        return NULL;
+    }
+    
+    /* Check topology */
+    if (submesh < 0 || submesh >= mesh->submesh_count ||
+        mesh->submesh_topologies[submesh] != SYLVES_MESH_TOPOLOGY_QUADS) {
+        sylves_error_set(error_out, SYLVES_ERROR_INVALID_OPERATION,
+                        "Invalid submesh or not quad topology");
+        return NULL;
+    }
+    
+    SylvesQuadAttributeInterp* interp = calloc(1, sizeof(SylvesQuadAttributeInterp));
+    if (!interp) {
+        sylves_error_set(error_out, SYLVES_ERROR_OUT_OF_MEMORY,
+                        "Failed to allocate attribute interpolation");
+        return NULL;
+    }
+    
+    /* Get vertex indices */
+    const int* indices = mesh->submesh_indices[submesh];
+    int face_count = mesh->submesh_index_counts[submesh] / 4;
+    
+    if (face < 0 || face >= face_count) {
+        free(interp);
+        sylves_error_set(error_out, SYLVES_ERROR_OUT_OF_RANGE,
+                        "Face index out of range");
+        return NULL;
+    }
+    
+    int i1, i2, i3, i4;
+    if (invert_winding) {
+        i1 = indices[face * 4 + 3];
+        i2 = indices[face * 4 + 2];
+        i3 = indices[face * 4 + 1];
+        i4 = indices[face * 4 + 0];
+    } else {
+        i1 = indices[face * 4 + 0];
+        i2 = indices[face * 4 + 1];
+        i3 = indices[face * 4 + 2];
+        i4 = indices[face * 4 + 3];
+    }
+    
+    /* Copy normal values */
+    interp->values.v3[0] = mesh->normals[i1];
+    interp->values.v3[1] = mesh->normals[i2];
+    interp->values.v3[2] = mesh->normals[i3];
+    interp->values.v3[3] = mesh->normals[i4];
+    
+    interp->is_3d = false;
+    interp->dimensions = 3;
+    
+    return interp;
+}
+
+/**
+ * @brief Create attribute interpolation for tangents
+ */
+SylvesQuadAttributeInterp* sylves_quad_interp_tangents_create(
+    const SylvesMeshData* mesh,
+    int submesh,
+    int face,
+    bool invert_winding,
+    SylvesError* error_out)
+{
+    /* Validate mesh has tangents */
+    if (!mesh || !mesh->tangents || mesh->tangent_count == 0) {
+        sylves_error_set(error_out, SYLVES_ERROR_INVALID_OPERATION,
+                        "Mesh needs tangents for tangent interpolation");
+        return NULL;
+    }
+    
+    /* Check topology */
+    if (submesh < 0 || submesh >= mesh->submesh_count ||
+        mesh->submesh_topologies[submesh] != SYLVES_MESH_TOPOLOGY_QUADS) {
+        sylves_error_set(error_out, SYLVES_ERROR_INVALID_OPERATION,
+                        "Invalid submesh or not quad topology");
+        return NULL;
+    }
+    
+    SylvesQuadAttributeInterp* interp = calloc(1, sizeof(SylvesQuadAttributeInterp));
+    if (!interp) {
+        sylves_error_set(error_out, SYLVES_ERROR_OUT_OF_MEMORY,
+                        "Failed to allocate attribute interpolation");
+        return NULL;
+    }
+    
+    /* Get vertex indices */
+    const int* indices = mesh->submesh_indices[submesh];
+    int face_count = mesh->submesh_index_counts[submesh] / 4;
+    
+    if (face < 0 || face >= face_count) {
+        free(interp);
+        sylves_error_set(error_out, SYLVES_ERROR_OUT_OF_RANGE,
+                        "Face index out of range");
+        return NULL;
+    }
+    
+    int i1, i2, i3, i4;
+    if (invert_winding) {
+        i1 = indices[face * 4 + 3];
+        i2 = indices[face * 4 + 2];
+        i3 = indices[face * 4 + 1];
+        i4 = indices[face * 4 + 0];
+    } else {
+        i1 = indices[face * 4 + 0];
+        i2 = indices[face * 4 + 1];
+        i3 = indices[face * 4 + 2];
+        i4 = indices[face * 4 + 3];
+    }
+    
+    /* Copy tangent values */
+    interp->values.v4[0] = mesh->tangents[i1];
+    interp->values.v4[1] = mesh->tangents[i2];
+    interp->values.v4[2] = mesh->tangents[i3];
+    interp->values.v4[3] = mesh->tangents[i4];
+    
+    interp->is_3d = false;
+    interp->dimensions = 4;
+    
+    return interp;
+}
+
+/**
+ * @brief Create attribute interpolation for UVs
+ */
+SylvesQuadAttributeInterp* sylves_quad_interp_uvs_create(
+    const SylvesMeshData* mesh,
+    int submesh,
+    int face,
+    bool invert_winding,
+    SylvesError* error_out)
+{
+    /* Validate mesh has UVs */
+    if (!mesh || !mesh->uvs || mesh->uv_count == 0) {
+        sylves_error_set(error_out, SYLVES_ERROR_INVALID_OPERATION,
+                        "Mesh needs UVs for UV interpolation");
+        return NULL;
+    }
+    
+    /* Check topology */
+    if (submesh < 0 || submesh >= mesh->submesh_count ||
+        mesh->submesh_topologies[submesh] != SYLVES_MESH_TOPOLOGY_QUADS) {
+        sylves_error_set(error_out, SYLVES_ERROR_INVALID_OPERATION,
+                        "Invalid submesh or not quad topology");
+        return NULL;
+    }
+    
+    SylvesQuadAttributeInterp* interp = calloc(1, sizeof(SylvesQuadAttributeInterp));
+    if (!interp) {
+        sylves_error_set(error_out, SYLVES_ERROR_OUT_OF_MEMORY,
+                        "Failed to allocate attribute interpolation");
+        return NULL;
+    }
+    
+    /* Get vertex indices */
+    const int* indices = mesh->submesh_indices[submesh];
+    int face_count = mesh->submesh_index_counts[submesh] / 4;
+    
+    if (face < 0 || face >= face_count) {
+        free(interp);
+        sylves_error_set(error_out, SYLVES_ERROR_OUT_OF_RANGE,
+                        "Face index out of range");
+        return NULL;
+    }
+    
+    int i1, i2, i3, i4;
+    if (invert_winding) {
+        i1 = indices[face * 4 + 3];
+        i2 = indices[face * 4 + 2];
+        i3 = indices[face * 4 + 1];
+        i4 = indices[face * 4 + 0];
+    } else {
+        i1 = indices[face * 4 + 0];
+        i2 = indices[face * 4 + 1];
+        i3 = indices[face * 4 + 2];
+        i4 = indices[face * 4 + 3];
+    }
+    
+    /* Copy UV values */
+    interp->values.v2[0] = mesh->uvs[i1];
+    interp->values.v2[1] = mesh->uvs[i2];
+    interp->values.v2[2] = mesh->uvs[i3];
+    interp->values.v2[3] = mesh->uvs[i4];
+    
+    interp->is_3d = false;
+    interp->dimensions = 2;
+    
+    return interp;
+}
+
+/**
+ * @brief Destroy attribute interpolation
+ */
+void sylves_quad_attribute_interp_destroy(SylvesQuadAttributeInterp* interp)
+{
+    free(interp);
+}
+
+/**
+ * @brief Interpolate vector2 attribute
+ */
+SylvesVector2 sylves_quad_interp_vector2(
+    const SylvesQuadAttributeInterp* interp,
+    SylvesVector3 p)
+{
+    if (!interp || interp->dimensions != 2) {
+        return sylves_vector2_zero();
+    }
+    
+    if (interp->is_3d) {
+        /* Trilinear interpolation for 3D prism */
+        float x1 = 0.5f - p.x;
+        float x2 = 0.5f + p.x;
+        float y1 = 0.5f - p.y;
+        float y2 = 0.5f + p.y;
+        float z1 = 0.5f - p.z;
+        float z2 = 0.5f + p.z;
+        
+        /* Interpolate along y */
+        SylvesVector2 u1 = sylves_vector2_add(
+            sylves_vector2_scale(interp->values.v2[3], y1),
+            sylves_vector2_scale(interp->values.v2[2], y2)
+        );
+        SylvesVector2 u2 = sylves_vector2_add(
+            sylves_vector2_scale(interp->values.v2[0], y1),
+            sylves_vector2_scale(interp->values.v2[1], y2)
+        );
+        SylvesVector2 u3 = sylves_vector2_add(
+            sylves_vector2_scale(interp->values.v2[7], y1),
+            sylves_vector2_scale(interp->values.v2[6], y2)
+        );
+        SylvesVector2 u4 = sylves_vector2_add(
+            sylves_vector2_scale(interp->values.v2[4], y1),
+            sylves_vector2_scale(interp->values.v2[5], y2)
+        );
+        
+        /* Interpolate along x */
+        SylvesVector2 w1 = sylves_vector2_add(
+            sylves_vector2_scale(u1, x1),
+            sylves_vector2_scale(u2, x2)
+        );
+        SylvesVector2 w2 = sylves_vector2_add(
+            sylves_vector2_scale(u3, x1),
+            sylves_vector2_scale(u4, x2)
+        );
+        
+        /* Interpolate along z */
+        return sylves_vector2_add(
+            sylves_vector2_scale(w1, z1),
+            sylves_vector2_scale(w2, z2)
+        );
+    } else {
+        /* Bilinear interpolation for 2D quad */
+        float x1 = 0.5f - p.x;
+        float x2 = 0.5f + p.x;
+        float y1 = 0.5f - p.y;
+        float y2 = 0.5f + p.y;
+        
+        /* Interpolate along y */
+        SylvesVector2 u1 = sylves_vector2_add(
+            sylves_vector2_scale(interp->values.v2[3], y1),
+            sylves_vector2_scale(interp->values.v2[2], y2)
+        );
+        SylvesVector2 u2 = sylves_vector2_add(
+            sylves_vector2_scale(interp->values.v2[0], y1),
+            sylves_vector2_scale(interp->values.v2[1], y2)
+        );
+        
+        /* Interpolate along x */
+        return sylves_vector2_add(
+            sylves_vector2_scale(u1, x1),
+            sylves_vector2_scale(u2, x2)
+        );
+    }
+}
+
+/**
+ * @brief Interpolate vector3 attribute
+ */
+SylvesVector3 sylves_quad_interp_vector3(
+    const SylvesQuadAttributeInterp* interp,
+    SylvesVector3 p)
+{
+    if (!interp || interp->dimensions != 3) {
+        return sylves_vector3_zero();
+    }
+    
+    if (interp->is_3d) {
+        /* Trilinear interpolation for 3D prism */
+        float x1 = 0.5f - p.x;
+        float x2 = 0.5f + p.x;
+        float y1 = 0.5f - p.y;
+        float y2 = 0.5f + p.y;
+        float z1 = 0.5f - p.z;
+        float z2 = 0.5f + p.z;
+        
+        /* Interpolate along y */
+        SylvesVector3 u1 = sylves_vector3_add(
+            sylves_vector3_scale(interp->values.v3[3], y1),
+            sylves_vector3_scale(interp->values.v3[2], y2)
+        );
+        SylvesVector3 u2 = sylves_vector3_add(
+            sylves_vector3_scale(interp->values.v3[0], y1),
+            sylves_vector3_scale(interp->values.v3[1], y2)
+        );
+        SylvesVector3 u3 = sylves_vector3_add(
+            sylves_vector3_scale(interp->values.v3[7], y1),
+            sylves_vector3_scale(interp->values.v3[6], y2)
+        );
+        SylvesVector3 u4 = sylves_vector3_add(
+            sylves_vector3_scale(interp->values.v3[4], y1),
+            sylves_vector3_scale(interp->values.v3[5], y2)
+        );
+        
+        /* Interpolate along x */
+        SylvesVector3 w1 = sylves_vector3_add(
+            sylves_vector3_scale(u1, x1),
+            sylves_vector3_scale(u2, x2)
+        );
+        SylvesVector3 w2 = sylves_vector3_add(
+            sylves_vector3_scale(u3, x1),
+            sylves_vector3_scale(u4, x2)
+        );
+        
+        /* Interpolate along z */
+        return sylves_vector3_add(
+            sylves_vector3_scale(w1, z1),
+            sylves_vector3_scale(w2, z2)
+        );
+    } else {
+        /* Bilinear interpolation for 2D quad */
+        float x1 = 0.5f - p.x;
+        float x2 = 0.5f + p.x;
+        float y1 = 0.5f - p.y;
+        float y2 = 0.5f + p.y;
+        
+        /* Interpolate along y */
+        SylvesVector3 u1 = sylves_vector3_add(
+            sylves_vector3_scale(interp->values.v3[3], y1),
+            sylves_vector3_scale(interp->values.v3[2], y2)
+        );
+        SylvesVector3 u2 = sylves_vector3_add(
+            sylves_vector3_scale(interp->values.v3[0], y1),
+            sylves_vector3_scale(interp->values.v3[1], y2)
+        );
+        
+        /* Interpolate along x */
+        return sylves_vector3_add(
+            sylves_vector3_scale(u1, x1),
+            sylves_vector3_scale(u2, x2)
+        );
+    }
+}
+
+/**
+ * @brief Interpolate vector4 attribute
+ */
+SylvesVector4 sylves_quad_interp_vector4(
+    const SylvesQuadAttributeInterp* interp,
+    SylvesVector3 p)
+{
+    if (!interp || interp->dimensions != 4) {
+        return sylves_vector4_zero();
+    }
+    
+    if (interp->is_3d) {
+        /* Trilinear interpolation for 3D prism */
+        float x1 = 0.5f - p.x;
+        float x2 = 0.5f + p.x;
+        float y1 = 0.5f - p.y;
+        float y2 = 0.5f + p.y;
+        float z1 = 0.5f - p.z;
+        float z2 = 0.5f + p.z;
+        
+        /* Interpolate along y */
+        SylvesVector4 u1 = sylves_vector4_add(
+            sylves_vector4_scale(interp->values.v4[3], y1),
+            sylves_vector4_scale(interp->values.v4[2], y2)
+        );
+        SylvesVector4 u2 = sylves_vector4_add(
+            sylves_vector4_scale(interp->values.v4[0], y1),
+            sylves_vector4_scale(interp->values.v4[1], y2)
+        );
+        SylvesVector4 u3 = sylves_vector4_add(
+            sylves_vector4_scale(interp->values.v4[7], y1),
+            sylves_vector4_scale(interp->values.v4[6], y2)
+        );
+        SylvesVector4 u4 = sylves_vector4_add(
+            sylves_vector4_scale(interp->values.v4[4], y1),
+            sylves_vector4_scale(interp->values.v4[5], y2)
+        );
+        
+        /* Interpolate along x */
+        SylvesVector4 w1 = sylves_vector4_add(
+            sylves_vector4_scale(u1, x1),
+            sylves_vector4_scale(u2, x2)
+        );
+        SylvesVector4 w2 = sylves_vector4_add(
+            sylves_vector4_scale(u3, x1),
+            sylves_vector4_scale(u4, x2)
+        );
+        
+        /* Interpolate along z */
+        return sylves_vector4_add(
+            sylves_vector4_scale(w1, z1),
+            sylves_vector4_scale(w2, z2)
+        );
+    } else {
+        /* Bilinear interpolation for 2D quad */
+        float x1 = 0.5f - p.x;
+        float x2 = 0.5f + p.x;
+        float y1 = 0.5f - p.y;
+        float y2 = 0.5f + p.y;
+        
+        /* Interpolate along y */
+        SylvesVector4 u1 = sylves_vector4_add(
+            sylves_vector4_scale(interp->values.v4[3], y1),
+            sylves_vector4_scale(interp->values.v4[2], y2)
+        );
+        SylvesVector4 u2 = sylves_vector4_add(
+            sylves_vector4_scale(interp->values.v4[0], y1),
+            sylves_vector4_scale(interp->values.v4[1], y2)
+        );
+        
+        /* Interpolate along x */
+        return sylves_vector4_add(
+            sylves_vector4_scale(u1, x1),
+            sylves_vector4_scale(u2, x2)
+        );
+    }
+}
